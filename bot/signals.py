@@ -1,73 +1,120 @@
 """Entry signal generation: RSI(14) oversold/overbought + 50/200 SMA trend
-filter + volume confirmation. Pure function over OHLC candles — no exchange
-calls, no state — so it's directly unit-testable.
+filter + volume confirmation. Pure functions over OHLC candles — no exchange
+calls, no state — so they're directly unit-testable.
+
+`compute_snapshot` computes the current indicator readings unconditionally
+(RSI, trend, volume ratio) so callers can narrate "what the bot is seeing"
+every cycle, independent of whether a trade signal actually fires.
+`evaluate` layers the signal decision on top of that same snapshot, so the
+narration and the trading decision are always looking at identical numbers —
+nothing is computed twice with room to drift apart.
 """
 
 from .indicators import rsi, sma, last_valid
 
 
-def generate_signal(ohlc, signals_cfg):
-    """`ohlc` is oldest->newest list of {o,h,l,c,v} dicts (Kraken candle shape,
-    excluding the still-forming last candle — callers should drop it).
-
-    Returns a candidate dict or None if no signal fires or there isn't enough
-    history yet to evaluate the slow SMA.
-    """
+def compute_snapshot(ohlc, signals_cfg):
+    """Latest RSI/SMA50/SMA200/volume readings, or None if there isn't enough
+    history yet to evaluate the slow SMA."""
+    sma_fast_period = signals_cfg.get("sma_fast", 50)
     sma_slow_period = signals_cfg.get("sma_slow", 200)
+    rsi_period = signals_cfg.get("rsi_period", 14)
+    volume_period = signals_cfg.get("volume_period", 20)
+
     if len(ohlc) < sma_slow_period + 2:
         return None
 
     closes = [c["c"] for c in ohlc]
     vols = [c["v"] for c in ohlc]
 
-    rsi_period = signals_cfg.get("rsi_period", 14)
-    rsi_series = rsi(closes, rsi_period)
-    sma_fast_series = sma(closes, signals_cfg.get("sma_fast", 50))
-    sma_slow_series = sma(closes, sma_slow_period)
-    vol_avg_series = sma(vols, signals_cfg.get("volume_period", 20))
-
-    last_rsi = last_valid(rsi_series)
-    last_sma_fast = last_valid(sma_fast_series)
-    last_sma_slow = last_valid(sma_slow_series)
-    last_vol_avg = last_valid(vol_avg_series)
-    last_close = closes[-1]
-    last_vol = vols[-1]
+    last_rsi = last_valid(rsi(closes, rsi_period))
+    last_sma_fast = last_valid(sma(closes, sma_fast_period))
+    last_sma_slow = last_valid(sma(closes, sma_slow_period))
+    last_vol_avg = last_valid(sma(vols, volume_period))
 
     if None in (last_rsi, last_sma_fast, last_sma_slow, last_vol_avg):
         return None
+
+    last_close = closes[-1]
+    last_vol = vols[-1]
+    trend = ("up" if last_sma_fast > last_sma_slow
+             else "down" if last_sma_fast < last_sma_slow else "flat")
+    volume_ratio = (last_vol / last_vol_avg) if last_vol_avg > 0 else 0.0
+
+    return {
+        "entry_price": last_close,
+        "rsi": last_rsi, "rsi_period": rsi_period,
+        "sma_fast": last_sma_fast, "sma_fast_period": sma_fast_period,
+        "sma_slow": last_sma_slow, "sma_slow_period": sma_slow_period,
+        "trend": trend,
+        "volume": last_vol, "volume_avg": last_vol_avg,
+        "volume_ratio": volume_ratio, "volume_period": volume_period,
+    }
+
+
+def describe_snapshot(snapshot):
+    """One-line plain-language description of the current indicator reading,
+    independent of whether a signal fired — used for the per-cycle reasoning
+    feed so every pair narrates what it's seeing on every poll, not just on a
+    trade."""
+    trend_word = {"up": "uptrend", "down": "downtrend", "flat": "flat/no trend"}[snapshot["trend"]]
+    return (
+        f"RSI({snapshot['rsi_period']})={snapshot['rsi']:.1f}; "
+        f"SMA{snapshot['sma_fast_period']} "
+        f"{'>' if snapshot['trend'] == 'up' else '<' if snapshot['trend'] == 'down' else '≈'} "
+        f"SMA{snapshot['sma_slow_period']} ({trend_word}); "
+        f"volume {snapshot['volume_ratio']:.2f}x the {snapshot['volume_period']}-period average."
+    )
+
+
+def evaluate(ohlc, signals_cfg):
+    """Returns (snapshot_or_None, candidate_or_None). `snapshot` is the raw
+    indicator reading (for narration); `candidate` is non-None only when RSI +
+    trend + volume all align into an actual trade signal."""
+    snapshot = compute_snapshot(ohlc, signals_cfg)
+    if snapshot is None:
+        return None, None
 
     oversold = signals_cfg.get("rsi_oversold", 30)
     overbought = signals_cfg.get("rsi_overbought", 70)
     vol_mult_min = signals_cfg.get("volume_mult_min", 1.3)
 
-    volume_confirmed = last_vol_avg > 0 and (last_vol / last_vol_avg) >= vol_mult_min
-    trend_up = last_sma_fast > last_sma_slow
-    trend_down = last_sma_fast < last_sma_slow
+    volume_confirmed = snapshot["volume_ratio"] >= vol_mult_min
+    trend_up = snapshot["trend"] == "up"
+    trend_down = snapshot["trend"] == "down"
 
     side = None
-    if last_rsi <= oversold and trend_up and volume_confirmed:
+    if snapshot["rsi"] <= oversold and trend_up and volume_confirmed:
         side = "buy"
-    elif last_rsi >= overbought and trend_down and volume_confirmed:
+    elif snapshot["rsi"] >= overbought and trend_down and volume_confirmed:
         side = "sell"
-    else:
-        return None
 
-    return {
+    if side is None:
+        return snapshot, None
+
+    candidate = {
         "side": side,
-        "entry_price": last_close,
-        "rsi": last_rsi,
-        "sma_fast": last_sma_fast,
-        "sma_slow": last_sma_slow,
-        "volume": last_vol,
-        "volume_avg": last_vol_avg,
+        "entry_price": snapshot["entry_price"],
+        "rsi": snapshot["rsi"],
+        "sma_fast": snapshot["sma_fast"],
+        "sma_slow": snapshot["sma_slow"],
+        "volume": snapshot["volume"],
+        "volume_avg": snapshot["volume_avg"],
         "reasoning_text": (
-            f"RSI({rsi_period})={last_rsi:.1f} "
+            f"RSI({snapshot['rsi_period']})={snapshot['rsi']:.1f} "
             f"({'oversold' if side == 'buy' else 'overbought'}, threshold "
             f"{oversold if side == 'buy' else overbought}); "
-            f"SMA{signals_cfg.get('sma_fast', 50)} "
-            f"{'>' if trend_up else '<'} SMA{sma_slow_period} confirms "
+            f"SMA{snapshot['sma_fast_period']} "
+            f"{'>' if trend_up else '<'} SMA{snapshot['sma_slow_period']} confirms "
             f"{'uptrend' if side == 'buy' else 'downtrend'}; "
-            f"volume {last_vol / last_vol_avg:.2f}x the "
-            f"{signals_cfg.get('volume_period', 20)}-period average."
+            f"volume {snapshot['volume_ratio']:.2f}x the "
+            f"{snapshot['volume_period']}-period average."
         ),
     }
+    return snapshot, candidate
+
+
+def generate_signal(ohlc, signals_cfg):
+    """Back-compat wrapper for callers (e.g. bot/backtest.py) that only need
+    the trade candidate, not the raw snapshot."""
+    return evaluate(ohlc, signals_cfg)[1]

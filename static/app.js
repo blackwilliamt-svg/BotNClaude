@@ -200,14 +200,15 @@ async function refreshTrades() {
 
 // ---- reasoning feed / events ------------------------------------------------
 async function refreshFeed() {
-  const decisions = await api("/api/decisions?limit=50");
+  const decisions = await api("/api/decisions?limit=80");
   const feed = $("#decisions-feed");
   feed.innerHTML = "";
   for (const d of decisions) {
     const div = document.createElement("div");
-    div.className = "feed-item";
+    div.className = "feed-item" + (d.stage === "scan" ? " scan-item" : "");
+    const costPart = d.stage === "scan" ? "" : ` · $${(d.cost_usd || 0).toFixed(3)}`;
     div.innerHTML = `
-      <div class="meta stage-${d.stage}">${d.stage.toUpperCase()} · ${d.pair || ""} · ${fmtTs(d.ts)} · $${(d.cost_usd || 0).toFixed(3)}</div>
+      <div class="meta stage-${d.stage}">${d.stage.toUpperCase()} · ${d.pair || ""} · ${fmtTs(d.ts)}${costPart}</div>
       <div>${d.summary || ""}</div>`;
     feed.appendChild(div);
   }

@@ -61,6 +61,8 @@ th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: upp
 .feed-item .stage-entry { color: var(--blue); }
 .feed-item .stage-checkin { color: var(--amber); }
 .feed-item .stage-settings_review { color: var(--green); }
+.feed-item .stage-scan { color: var(--muted); }
+.feed-item.scan-item { opacity: 0.85; }
 .side-buy { color: var(--green); }
 .side-sell { color: var(--red); }
 .right-col { display: flex; flex-direction: column; }

@@ -21,7 +21,7 @@ from .risk import (
     resolve_leverage, liquidation_price_estimate, margin_level_status,
     exposure_summary,
 )
-from .signals import generate_signal
+from .signals import evaluate as evaluate_signal, describe_snapshot
 from .backtest import compare_configs
 
 logger = logging.getLogger("bot.engine")
@@ -47,6 +47,7 @@ class Engine:
         self._last_poll_at = None
         self._last_checkin_poll_at = None
         self._last_loop_error = None
+        self._pair_display_cache = {}
 
     # ---- lifecycle --------------------------------------------------------
     def start(self):
@@ -99,10 +100,25 @@ class Engine:
         return peak
 
     def pair_display(self, pair):
+        if pair in self._pair_display_cache:
+            return self._pair_display_cache[pair]
         try:
-            return self.kc.asset_pairs([pair])[pair]["display"]
+            display = self.kc.asset_pairs([pair])[pair]["display"]
         except Exception:
-            return pair
+            display = pair
+        self._pair_display_cache[pair] = display
+        return display
+
+    def _narrate(self, pair, summary, confidence=None, leverage=None, approved=None):
+        """Log a plain-language reasoning-feed entry for this pair's current
+        poll cycle — fires every cycle, not just when a trade is placed, so
+        the dashboard shows the bot's ongoing thinking (indicator readings and
+        why it did or didn't act) rather than only its trade history."""
+        self.db.insert_decision(
+            trade_id=None, stage="scan", model=None, pair=pair, claude_raw_response=None,
+            approved=approved, confidence=confidence, leverage_rec=leverage, cost_usd=0.0,
+            summary=summary,
+        )
 
     # ---- scan loop (entries) ----------------------------------------------
     async def scan_loop(self):
@@ -134,14 +150,27 @@ class Engine:
             await asyncio.sleep(self.cfg.get("poll_interval_sec", 60))
 
     async def _scan_pair(self, pair):
+        pair_display = self.pair_display(pair)
+
         if any(t["pair"] == pair for t in self.db.open_trades()):
-            return  # one position per pair at a time
+            self._narrate(pair, f"{pair_display}: already holding an open position — "
+                                f"skipping new-entry scan this cycle.")
+            return
 
         ohlc_full = self.kc.ohlc(pair, CANDLE_INTERVAL_MIN)
         ohlc = ohlc_full[:-1]  # drop the still-forming candle
         signals_cfg = self.cfg.get("signals", {})
-        candidate = generate_signal(ohlc, signals_cfg)
+        snapshot, candidate = evaluate_signal(ohlc, signals_cfg)
+        if snapshot is None:
+            self._narrate(pair, f"{pair_display}: not enough candle history yet to evaluate "
+                                f"the {signals_cfg.get('sma_slow', 200)}-period SMA.")
+            return
+
+        indicator_text = describe_snapshot(snapshot)
+
         if not candidate:
+            self._narrate(pair, f"{pair_display}: {indicator_text} No entry signal this cycle "
+                                f"— RSI/trend/volume thresholds not all met.")
             return
 
         risk_cfg = self.cfg.get("risk", {})
@@ -150,12 +179,16 @@ class Engine:
             risk_cfg.get("atr_period", 14), risk_cfg.get("atr_stop_mult", 1.75),
         )
         if stop_price is None:
+            self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
+                                f"fired but ATR isn't available yet to place a stop — skipping.")
             return
 
         equity = self.broker.account_equity()
         peak = self._update_peak_equity(equity)
         if drawdown_triggered(peak, equity):
-            self.db.insert_event("info", f"Drawdown breaker active — skipping new entries")
+            self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
+                                f"fired but the drawdown circuit breaker is active — no new entries.")
+            self.db.insert_event("info", "Drawdown breaker active — skipping new entries")
             return
 
         open_trades = self.db.open_trades()
@@ -169,6 +202,8 @@ class Engine:
             open_margin_used=open_margin_used,
         )
         if tentative_size <= 0:
+            self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
+                                f"fired but exposure caps leave no room to size a position — skipping.")
             return
 
         cost_cfg = self.cfg.get("cost_filter", {})
@@ -176,9 +211,11 @@ class Engine:
                                  cost_cfg.get("taker_fee_pct", 0.0026),
                                  cost_cfg.get("claude_cost_estimate_usd", 0.03))
         if not passes_cost_filter(edge, cost_cfg.get("min_edge_usd", 1.0)):
+            self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
+                                f"fired but failed the cost filter (est. edge ${edge:.2f} after fees "
+                                f"and Claude's cost) — not worth a Claude check this cycle.")
             return
 
-        pair_display = self.pair_display(pair)
         account_context = {
             "equity": equity,
             "open_position_count": len(open_trades),
@@ -192,13 +229,20 @@ class Engine:
             cost_usd=cost, summary=parsed["rationale"],
         )
         if not parsed["approve"]:
+            self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
+                                f"fired, Claude reviewed it (confidence {parsed['confidence']:.0f}%) "
+                                f"and VETOED: {parsed['rationale']}",
+                          confidence=parsed["confidence"], approved=False)
             return
 
         leverage_tiers = self.cfg.get("leverage.tiers", [])
         leverage = resolve_leverage(parsed["confidence"], leverage_tiers, kraken_pair_max)
         if leverage <= 0:
-            self.db.insert_event("info", f"{pair_display}: Claude approved but confidence "
-                                        f"tier maps to 0x leverage — no trade")
+            self._narrate(pair, f"{pair_display}: {indicator_text} Claude approved the "
+                                f"{candidate['side'].upper()} signal (confidence "
+                                f"{parsed['confidence']:.0f}%) but that confidence maps to the 0x "
+                                f"leverage tier — no trade.",
+                          confidence=parsed["confidence"], approved=True, leverage=0)
             return
 
         size, margin_required, size_reason = position_size_and_margin(
@@ -208,7 +252,10 @@ class Engine:
             open_margin_used=open_margin_used,
         )
         if size <= 0:
-            self.db.insert_event("info", f"{pair_display}: exposure cap reached, skipping trade")
+            self._narrate(pair, f"{pair_display}: {indicator_text} Claude approved at {leverage}x "
+                                f"(confidence {parsed['confidence']:.0f}%) but exposure caps leave no "
+                                f"room to size the position — skipping.",
+                          confidence=parsed["confidence"], approved=True, leverage=leverage)
             return
 
         margin_stop_pct = self.kc.asset_pairs([pair]).get(pair, {}).get("margin_stop", 40.0)
@@ -228,6 +275,10 @@ class Engine:
         self.db.set_decision_trade_id(decision_id, trade_id)
         if self.broker.mode == "live":
             self.reconciler.reconcile_trade(self.db.get_trade(trade_id))
+        self._narrate(pair, f"{pair_display}: {indicator_text} Claude approved at {leverage}x leverage "
+                            f"(confidence {parsed['confidence']:.0f}%) — opened {candidate['side'].upper()} "
+                            f"trade #{trade_id}, size {size:.6f}.",
+                      confidence=parsed["confidence"], approved=True, leverage=leverage)
         logger.info("Opened %s %s trade #%s size=%.6f lev=%sx", candidate["side"], pair,
                    trade_id, size, leverage)
 
@@ -320,6 +371,12 @@ class Engine:
                 logger.warning("Settings review skipped: %s", e)
             except Exception:
                 logger.exception("Settings review failed")
+            try:
+                # Per-cycle narration (bot/signals.py evaluate()) makes the
+                # decisions table grow much faster than before — keep it bounded.
+                self.db.prune()
+            except Exception:
+                logger.exception("Housekeeping prune failed")
 
     def _aggregate_trade_stats(self):
         closed = self.db.all_closed_trades()
