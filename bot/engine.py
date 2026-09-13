@@ -8,6 +8,8 @@ import asyncio
 import json
 import logging
 import time
+import traceback
+from datetime import datetime, timezone
 
 from .broker import make_broker
 from .claude_gate import ClaudeGate, ClaudeGateError
@@ -40,14 +42,22 @@ class Engine:
         self._refresh_broker()
         self._tasks = []
         self._latest_status = {}
+        # Self-check state, surfaced via status() / /api/status so a stalled
+        # or never-started loop is visible from the dashboard, not just logs.
+        self._last_poll_at = None
+        self._last_checkin_poll_at = None
+        self._last_loop_error = None
 
     # ---- lifecycle --------------------------------------------------------
     def start(self):
         self._tasks = [
-            asyncio.create_task(self._loop_guard(self.scan_loop, "scan_loop")),
-            asyncio.create_task(self._loop_guard(self.checkin_loop, "checkin_loop")),
-            asyncio.create_task(self._loop_guard(self.settings_review_loop, "settings_review_loop")),
+            asyncio.create_task(self._loop_guard(self.scan_loop, "scan_loop"), name="scan_loop"),
+            asyncio.create_task(self._loop_guard(self.checkin_loop, "checkin_loop"), name="checkin_loop"),
+            asyncio.create_task(self._loop_guard(self.settings_review_loop, "settings_review_loop"),
+                                name="settings_review_loop"),
         ]
+        logger.info("[engine] scheduled %d background loop task(s): %s",
+                   len(self._tasks), ", ".join(t.get_name() for t in self._tasks))
 
     async def stop(self):
         for t in self._tasks:
@@ -60,8 +70,12 @@ class Engine:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                tb = traceback.format_exc()
                 logger.exception("%s crashed, restarting in 30s", name)
-                self.db.insert_event("error", f"{name} crashed and is restarting")
+                # Full traceback goes into the event log (not just the journal/
+                # console) so a crash loop is visible from the dashboard itself.
+                self._last_loop_error = {"loop": name, "ts": time.time(), "traceback": tb}
+                self.db.insert_event("error", f"{name} crashed and is restarting:\n{tb}")
                 await asyncio.sleep(30)
 
     def _refresh_broker(self):
@@ -93,6 +107,9 @@ class Engine:
     # ---- scan loop (entries) ----------------------------------------------
     async def scan_loop(self):
         while True:
+            self._last_poll_at = time.time()
+            logger.info("[engine] poll cycle started at %s",
+                       datetime.now(timezone.utc).isoformat())
             self._refresh_broker()
             if self._should_run():
                 for pair in self.cfg.get("pairs", []):
@@ -102,13 +119,18 @@ class Engine:
                         logger.warning("scan_pair(%s) failed: %s", pair, e)
                         self.db.insert_event("warning", f"{pair} scan failed: {e}")
                     except Exception:
+                        tb = traceback.format_exc()
                         logger.exception("scan_pair(%s) unexpected error", pair)
+                        self._last_loop_error = {"loop": f"scan_pair:{pair}", "ts": time.time(), "traceback": tb}
+                        self.db.insert_event("error", f"{pair} scan hit an unexpected error:\n{tb}")
                 try:
                     equity = self.broker.account_equity()
                     self.db.insert_equity(equity, self.cfg.mode)
                     self._update_peak_equity(equity)
                 except Exception:
+                    tb = traceback.format_exc()
                     logger.exception("Failed to record equity")
+                    self.db.insert_event("error", f"Failed to record equity:\n{tb}")
             await asyncio.sleep(self.cfg.get("poll_interval_sec", 60))
 
     async def _scan_pair(self, pair):
@@ -212,14 +234,22 @@ class Engine:
     # ---- check-in loop (open positions) ------------------------------------
     async def checkin_loop(self):
         while True:
+            self._last_checkin_poll_at = time.time()
+            logger.info("[engine] checkin poll cycle started at %s",
+                       datetime.now(timezone.utc).isoformat())
             if self._should_run():
                 for trade in self.db.open_trades():
                     try:
                         await self._checkin_trade(trade)
                     except (KrakenError, ClaudeGateError) as e:
                         logger.warning("checkin(#%s) failed: %s", trade["id"], e)
+                        self.db.insert_event("warning", f"Check-in for trade #{trade['id']} failed: {e}")
                     except Exception:
+                        tb = traceback.format_exc()
                         logger.exception("checkin(#%s) unexpected error", trade["id"])
+                        self._last_loop_error = {"loop": f"checkin:{trade['id']}", "ts": time.time(), "traceback": tb}
+                        self.db.insert_event("error", f"Check-in for trade #{trade['id']} hit an "
+                                                      f"unexpected error:\n{tb}")
             if self.broker.mode == "live":
                 try:
                     self.reconciler.reconcile_all_open_live()
@@ -361,10 +391,18 @@ class Engine:
         self.cfg.set("kill_switch", False)
         self.db.insert_event("info", "Kill switch released, trading resumed")
 
+    def _loop_alive(self, last_ts, interval_sec):
+        if last_ts is None:
+            return False
+        stale_after = max(180, interval_sec * 3)
+        return (time.time() - last_ts) < stale_after
+
     def status(self):
         equity = self.broker.account_equity() if self.broker else None
         margin_level = self.broker.margin_level() if self.broker else None
         peak = self.db.kv_get("peak_equity", equity)
+        scan_alive = self._loop_alive(self._last_poll_at, self.cfg.get("poll_interval_sec", 60))
+        checkin_alive = self._loop_alive(self._last_checkin_poll_at, self.cfg.get("checkin_interval_sec", 900))
         return {
             "mode": self.cfg.mode,
             "kill_switch": self.cfg.get("kill_switch", False),
@@ -374,4 +412,12 @@ class Engine:
             "margin_level": margin_level,
             "margin_status": margin_level_status(margin_level),
             "open_position_count": len(self.db.open_trades()),
+            # Self-check: a loop that never started, or stopped updating
+            # its timestamp, shows up here instead of only in the logs.
+            "engine_loop_alive": scan_alive and checkin_alive,
+            "scan_loop_alive": scan_alive,
+            "checkin_loop_alive": checkin_alive,
+            "last_poll_at": self._last_poll_at,
+            "last_checkin_poll_at": self._last_checkin_poll_at,
+            "last_loop_error": self._last_loop_error,
         }

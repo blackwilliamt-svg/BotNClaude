@@ -72,6 +72,12 @@ async function refreshStatus() {
 
   $("#stat-positions").textContent = s.open_position_count;
 
+  const engineStat = $("#stat-engine");
+  engineStat.textContent = s.engine_loop_alive ? "alive" : "STALLED";
+  engineStat.className = "value " + (s.engine_loop_alive ? "pos" : "danger");
+  engineStat.title = `scan last: ${fmtTs(s.last_poll_at)} · checkin last: ${fmtTs(s.last_checkin_poll_at)}`
+    + (s.last_loop_error ? ` · last error in ${s.last_loop_error.loop} at ${fmtTs(s.last_loop_error.ts)}` : "");
+
   $("#kill-status").textContent = s.kill_switch ? "⛔ HALTED" : "";
   $("#btn-resume").style.display = s.kill_switch ? "inline-block" : "none";
   $("#btn-kill").style.display = s.kill_switch ? "none" : "inline-block";
