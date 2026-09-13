@@ -1,0 +1,8 @@
+# Copy to /etc/caddy/Caddyfile on the droplet and `systemctl reload caddy`.
+# Caddy handles automatic Let's Encrypt TLS — this is what keeps the
+# dashboard's HTTP Basic Auth from ever going over the wire in the clear.
+# DuckDNS domain: make sure your DuckDNS record points at the droplet's IP
+# and port 80/443 are open before Caddy tries to issue the certificate.
+botnclaude.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+}

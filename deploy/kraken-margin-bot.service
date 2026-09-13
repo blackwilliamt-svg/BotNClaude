@@ -1,0 +1,24 @@
+[Unit]
+Description=Kraken Margin Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kraken-bot
+WorkingDirectory=/opt/kraken-margin-bot
+EnvironmentFile=/etc/kraken-margin-bot.env
+ExecStart=/opt/kraken-margin-bot/.venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Basic hardening — the process only needs its own working dir and outbound network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/kraken-margin-bot
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
