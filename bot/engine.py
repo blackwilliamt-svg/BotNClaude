@@ -228,6 +228,8 @@ class Engine:
             confidence=parsed["confidence"], leverage_rec=parsed["leverage_recommendation"],
             cost_usd=cost, summary=parsed["rationale"],
         )
+        self.db.insert_event("info", f"{pair_display}: Claude entry check called — "
+                                    f"confidence {parsed['confidence']}%, cost ${cost:.3f}")
         if not parsed["approve"]:
             self._narrate(pair, f"{pair_display}: {indicator_text} {candidate['side'].upper()} signal "
                                 f"fired, Claude reviewed it (confidence {parsed['confidence']:.0f}%) "
@@ -330,6 +332,8 @@ class Engine:
             confidence=None, leverage_rec=parsed.get("new_leverage"), cost_usd=cost,
             summary=parsed["reasoning"],
         )
+        self.db.insert_event("info", f"Trade #{trade['id']} check-in called — "
+                                    f"action: {parsed['action']}, cost ${cost:.3f}")
         self.db.insert_checkin(trade["id"], parsed["action"], parsed["reasoning"])
 
         action = parsed["action"]
@@ -412,6 +416,7 @@ class Engine:
             pair=None, claude_raw_response=response.to_json(), approved=None, confidence=None,
             leverage_rec=None, cost_usd=cost, summary=parsed["rationale"],
         )
+        self.db.insert_event("info", f"Settings review called — cost ${cost:.3f}")
         if parsed.get("proposed_changes"):
             backtest_result = self._backtest_proposal(parsed["proposed_changes"])
             self.db.insert_settings_proposal(parsed["proposed_changes"], parsed["rationale"], backtest_result)
