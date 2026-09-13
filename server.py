@@ -21,8 +21,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import config as config_module
 from db import Database
 from secrets_store import SecretsStore, SecretsUnavailable
-from bot.engine import Engine
+from bot.engine import Engine, CANDLE_INTERVAL_MIN
 from bot.backtest import compare_configs
+from bot.indicators import sma, rsi as rsi_fn
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -107,6 +108,67 @@ def api_positions():
 @app.get("/api/equity_curve")
 def api_equity_curve(limit: int = 2000):
     return db.equity_curve(limit)
+
+
+@app.get("/api/chart")
+def api_chart(pair: Optional[str] = None, limit: int = 300):
+    """Price + the exact indicators the engine trades on, all computed with
+    the same `bot/indicators.py` functions and config-driven periods the
+    engine itself uses (bot/signals.py) — no separate frontend indicator math.
+    Confidence markers come straight from logged entry decisions."""
+    pair = pair or (cfg.get("pairs") or ["XBTUSD"])[0]
+    try:
+        ohlc = engine.kc.ohlc(pair, CANDLE_INTERVAL_MIN)[:-1]  # drop forming candle, same as the engine
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch OHLC data: {e}")
+    ohlc = ohlc[-limit:]
+
+    signals_cfg = cfg.get("signals", {})
+    closes = [c["c"] for c in ohlc]
+    vols = [c["v"] for c in ohlc]
+    sma_fast_period = signals_cfg.get("sma_fast", 50)
+    sma_slow_period = signals_cfg.get("sma_slow", 200)
+    rsi_period = signals_cfg.get("rsi_period", 14)
+    vol_period = signals_cfg.get("volume_period", 20)
+
+    sma_fast_series = sma(closes, sma_fast_period)
+    sma_slow_series = sma(closes, sma_slow_period)
+    rsi_series = rsi_fn(closes, rsi_period)
+    vol_avg_series = sma(vols, vol_period)
+
+    def to_points(values):
+        return [{"time": ohlc[i]["t"], "value": values[i]}
+                for i in range(len(ohlc)) if values[i] is not None]
+
+    interval_sec = CANDLE_INTERVAL_MIN * 60
+    decisions = db.entry_decisions_for_pair(pair, since_ts=(ohlc[0]["t"] if ohlc else None))
+    markers = []
+    for d in decisions:
+        if d["confidence"] is None:
+            continue
+        candle_time = int(d["ts"] // interval_sec * interval_sec)
+        markers.append({
+            "time": candle_time,
+            "confidence": d["confidence"],
+            "approved": bool(d["approved"]),
+            "summary": d["summary"],
+        })
+
+    return {
+        "pair": pair,
+        "candle_interval_min": CANDLE_INTERVAL_MIN,
+        "candles": [{"time": c["t"], "open": c["o"], "high": c["h"], "low": c["l"], "close": c["c"]}
+                   for c in ohlc],
+        "volume": [{"time": c["t"], "value": c["v"]} for c in ohlc],
+        "sma_fast": to_points(sma_fast_series),
+        "sma_slow": to_points(sma_slow_series),
+        "sma_fast_period": sma_fast_period,
+        "sma_slow_period": sma_slow_period,
+        "rsi": to_points(rsi_series),
+        "rsi_period": rsi_period,
+        "volume_avg": to_points(vol_avg_series),
+        "markers": markers,
+    }
 
 
 # ---- trade history ----------------------------------------------------------

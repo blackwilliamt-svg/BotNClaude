@@ -157,6 +157,15 @@ class Database:
     def set_decision_trade_id(self, decision_id, trade_id):
         self._exec("UPDATE decisions SET trade_id=? WHERE id=?", (trade_id, decision_id))
 
+    def entry_decisions_for_pair(self, pair, since_ts=None, limit=500):
+        if since_ts is not None:
+            return self._query(
+                "SELECT * FROM decisions WHERE stage='entry' AND pair=? AND ts>=? "
+                "ORDER BY ts ASC LIMIT ?", (pair, since_ts, limit))
+        return self._query(
+            "SELECT * FROM decisions WHERE stage='entry' AND pair=? ORDER BY ts ASC LIMIT ?",
+            (pair, limit))
+
     def insert_checkin(self, trade_id, action, reasoning, ts=None):
         self._exec("INSERT INTO checkins (trade_id, ts, action, reasoning) VALUES (?,?,?,?)",
                    (trade_id, ts or time.time(), action, reasoning))

@@ -53,6 +53,78 @@ async function refreshChart() {
   if (data.length) equitySeries.setData(data);
 }
 
+// ---- price chart (candles + SMA50/200 + confidence markers, RSI, volume) --
+let priceChart, candleSeries, smaFastSeries, smaSlowSeries;
+let rsiChart, rsiSeries;
+let volumeChart, volumeSeries, volumeAvgSeries;
+
+const CHART_OPTS_BASE = {
+  layout: { background: { color: "#161b22" }, textColor: "#e6edf3" },
+  grid: { vertLines: { color: "#2a2f3a" }, horzLines: { color: "#2a2f3a" } },
+  timeScale: { timeVisible: true },
+};
+
+function initPriceCharts() {
+  priceChart = LightweightCharts.createChart($("#price-chart"), {
+    ...CHART_OPTS_BASE, width: $("#price-chart").clientWidth, height: 300,
+  });
+  candleSeries = priceChart.addCandlestickSeries({
+    upColor: "#3fb950", downColor: "#f85149", borderVisible: false,
+    wickUpColor: "#3fb950", wickDownColor: "#f85149",
+  });
+  smaFastSeries = priceChart.addLineSeries({ color: "#f0b90b", lineWidth: 1 });
+  smaSlowSeries = priceChart.addLineSeries({ color: "#8957e5", lineWidth: 1 });
+
+  rsiChart = LightweightCharts.createChart($("#rsi-chart"), {
+    ...CHART_OPTS_BASE, width: $("#rsi-chart").clientWidth, height: 100,
+  });
+  rsiSeries = rsiChart.addLineSeries({ color: "#58a6ff", lineWidth: 1 });
+
+  volumeChart = LightweightCharts.createChart($("#volume-chart"), {
+    ...CHART_OPTS_BASE, width: $("#volume-chart").clientWidth, height: 100,
+  });
+  volumeSeries = volumeChart.addHistogramSeries({ color: "#2a2f3a" });
+  volumeAvgSeries = volumeChart.addLineSeries({ color: "#3fb950", lineWidth: 1 });
+
+  // Keep the three time axes in lockstep so a scroll/zoom on one scrolls all.
+  const charts = [priceChart, rsiChart, volumeChart];
+  charts.forEach((c, i) => {
+    c.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (!range) return;
+      charts.forEach((other, j) => {
+        if (i !== j) other.timeScale().setVisibleLogicalRange(range);
+      });
+    });
+  });
+
+  window.addEventListener("resize", () => {
+    priceChart.applyOptions({ width: $("#price-chart").clientWidth });
+    rsiChart.applyOptions({ width: $("#rsi-chart").clientWidth });
+    volumeChart.applyOptions({ width: $("#volume-chart").clientWidth });
+  });
+}
+
+async function refreshPriceChart() {
+  const data = await api("/api/chart?limit=300");
+  $("#price-chart-pair").textContent = data.pair;
+
+  candleSeries.setData(data.candles);
+  smaFastSeries.setData(data.sma_fast);
+  smaSlowSeries.setData(data.sma_slow);
+  rsiSeries.setData(data.rsi);
+  volumeSeries.setData(data.volume);
+  volumeAvgSeries.setData(data.volume_avg);
+
+  const markers = data.markers.map((m) => ({
+    time: m.time,
+    position: "aboveBar",
+    color: m.approved ? "#3fb950" : "#f85149",
+    shape: "circle",
+    text: `${Math.round(m.confidence)}%`,
+  }));
+  candleSeries.setMarkers(markers);
+}
+
 // ---- status -------------------------------------------------------------
 async function refreshStatus() {
   const s = await api("/api/status");
@@ -325,7 +397,7 @@ async function refreshAll() {
   try {
     await Promise.all([
       refreshStatus(), refreshPositions(), refreshTrades(),
-      refreshFeed(), refreshChart(), refreshProposalCount(),
+      refreshFeed(), refreshChart(), refreshPriceChart(), refreshProposalCount(),
     ]);
   } catch (e) {
     console.error("refresh failed", e);
@@ -333,5 +405,6 @@ async function refreshAll() {
 }
 
 initChart();
+initPriceCharts();
 refreshAll();
 setInterval(refreshAll, 8000);
