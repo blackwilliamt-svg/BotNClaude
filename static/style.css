@@ -7,6 +7,7 @@
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px;
+  overflow-x: hidden;
 }
 header {
   display: flex; align-items: center; justify-content: space-between;
@@ -30,6 +31,10 @@ button.danger { border-color: var(--red); color: var(--red); }
 button.danger:hover { background: var(--red); color: white; }
 button.primary { border-color: var(--blue); color: var(--blue); }
 main { padding: 16px 20px; display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+/* Grid items default to min-width:auto (their content's min-content size),
+   which lets them overflow their track instead of shrinking — this is what
+   was pushing the whole page wider than the viewport on narrow screens. */
+.left-col, .right-col { min-width: 0; }
 .panel {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   padding: 14px; margin-bottom: 16px;
@@ -56,6 +61,13 @@ main { padding: 16px 20px; display: grid; grid-template-columns: 2fr 1fr; gap: 1
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+#decisions-feed {
+  max-height: 65vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+#events-feed {
+  max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .feed-item { border-bottom: 1px solid var(--border); padding: 8px 0; font-size: 13px; }
 .feed-item .meta { color: var(--muted); font-size: 11px; }
 .feed-item .stage-entry { color: var(--blue); }
@@ -85,3 +97,30 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px;
 .proposal { border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
 .proposal pre { white-space: pre-wrap; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 4px; }
 .badge-approved { color: var(--green); } .badge-rejected { color: var(--red); } .badge-pending { color: var(--amber); }
+
+/* ---- responsive / mobile ------------------------------------------------ */
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  header { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+  header h1 { font-size: 15px; }
+  .header-right { flex-wrap: wrap; gap: 8px; width: 100%; }
+  .header-right button { flex: 1 1 auto; min-height: 40px; }
+  .panel { padding: 12px; margin-bottom: 12px; }
+  .stat-row { gap: 12px 20px; }
+  .stat .value { font-size: 17px; }
+  #price-chart { height: 220px; }
+  #rsi-chart, #volume-chart { height: 80px; }
+  #chart { height: 240px; }
+  .modal { width: 92vw; max-width: 92vw; padding: 16px; }
+  #decisions-feed { max-height: 50vh; }
+  #events-feed { max-height: 30vh; }
+}
+
+@media (max-width: 480px) {
+  body { font-size: 13px; }
+  .settings-grid { grid-template-columns: 1fr; }
+  button { padding: 8px 12px; font-size: 13px; }
+  .stat-row { gap: 10px 16px; }
+  table { font-size: 12px; }
+  th, td { padding: 5px 6px; }
+}
