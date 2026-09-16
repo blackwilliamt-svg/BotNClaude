@@ -41,12 +41,13 @@ DEFAULT_CONFIG = {
 
     "signals": {
         "rsi_period": 14,
-        "rsi_oversold": 30,
-        "rsi_overbought": 70,
+        "rsi_oversold": 40,
+        "rsi_overbought": 60,
         "sma_fast": 50,
         "sma_slow": 200,
         "volume_period": 20,
-        "volume_mult_min": 1.3,
+        "volume_mult_min": 1.0,
+        "require_volume_confirmation": True,  # set false to disable volume confirmation entirely (testing)
     },
 
     "risk": {

@@ -10,7 +10,21 @@ narration and the trading decision are always looking at identical numbers —
 nothing is computed twice with room to drift apart.
 """
 
+import logging
+
 from .indicators import rsi, sma, last_valid
+
+logger = logging.getLogger("bot.signals")
+
+
+def _require(signals_cfg, key):
+    """Fetch a tunable threshold with no silent fallback — a missing/None
+    value in config.json is a misconfiguration, not something we should
+    paper over with a hardcoded default that could quietly mask it."""
+    value = signals_cfg.get(key)
+    if value is None:
+        raise ValueError(f"signals config is missing required key '{key}' — check config.json")
+    return value
 
 
 def compute_snapshot(ohlc, signals_cfg):
@@ -70,28 +84,67 @@ def describe_snapshot(snapshot):
 def evaluate(ohlc, signals_cfg):
     """Returns (snapshot_or_None, candidate_or_None). `snapshot` is the raw
     indicator reading (for narration); `candidate` is non-None only when RSI +
-    trend + volume all align into an actual trade signal."""
+    trend + volume all align into an actual trade signal.
+
+    When no candidate fires, `snapshot["blocked_reasons"]` names exactly
+    which condition(s) blocked entry (RSI not extreme / trend mismatch /
+    volume not confirmed) so the caller can log something more useful than a
+    generic "thresholds not all met"."""
     snapshot = compute_snapshot(ohlc, signals_cfg)
     if snapshot is None:
         return None, None
 
-    oversold = signals_cfg.get("rsi_oversold", 30)
-    overbought = signals_cfg.get("rsi_overbought", 70)
-    vol_mult_min = signals_cfg.get("volume_mult_min", 1.3)
+    oversold = _require(signals_cfg, "rsi_oversold")
+    overbought = _require(signals_cfg, "rsi_overbought")
+    vol_mult_min = _require(signals_cfg, "volume_mult_min")
+    require_volume_confirmation = signals_cfg.get("require_volume_confirmation", True)
 
-    volume_confirmed = snapshot["volume_ratio"] >= vol_mult_min
+    rsi_oversold_hit = snapshot["rsi"] <= oversold
+    rsi_overbought_hit = snapshot["rsi"] >= overbought
     trend_up = snapshot["trend"] == "up"
     trend_down = snapshot["trend"] == "down"
+    volume_confirmed = (not require_volume_confirmation) or (snapshot["volume_ratio"] >= vol_mult_min)
+
+    snapshot["rsi_oversold_threshold"] = oversold
+    snapshot["rsi_overbought_threshold"] = overbought
+    snapshot["volume_mult_min"] = vol_mult_min
+    snapshot["require_volume_confirmation"] = require_volume_confirmation
+    snapshot["volume_confirmed"] = volume_confirmed
+
+    if not require_volume_confirmation:
+        logger.debug("volume confirmation disabled by config — treating as satisfied "
+                     "(actual ratio %.2fx)", snapshot["volume_ratio"])
 
     side = None
-    if snapshot["rsi"] <= oversold and trend_up and volume_confirmed:
+    if rsi_oversold_hit and trend_up and volume_confirmed:
         side = "buy"
-    elif snapshot["rsi"] >= overbought and trend_down and volume_confirmed:
+    elif rsi_overbought_hit and trend_down and volume_confirmed:
         side = "sell"
 
     if side is None:
+        blocked_reasons = []
+        if not (rsi_oversold_hit or rsi_overbought_hit):
+            reason = (f"RSI {snapshot['rsi']:.1f} not extreme "
+                      f"(needs <= {oversold} or >= {overbought})")
+            blocked_reasons.append(reason)
+            logger.debug("signal rejected: %s", reason)
+        else:
+            rsi_side = "buy" if rsi_oversold_hit else "sell"
+            trend_ok = trend_up if rsi_side == "buy" else trend_down
+            if not trend_ok:
+                reason = (f"RSI hit {rsi_side} threshold but trend is "
+                          f"{snapshot['trend']} (needs {'up' if rsi_side == 'buy' else 'down'})")
+                blocked_reasons.append(reason)
+                logger.debug("signal rejected: %s", reason)
+            if not volume_confirmed:
+                reason = (f"volume {snapshot['volume_ratio']:.2f}x below required "
+                          f"{vol_mult_min}x")
+                blocked_reasons.append(reason)
+                logger.debug("signal rejected: %s", reason)
+        snapshot["blocked_reasons"] = blocked_reasons
         return snapshot, None
 
+    snapshot["blocked_reasons"] = []
     candidate = {
         "side": side,
         "entry_price": snapshot["entry_price"],

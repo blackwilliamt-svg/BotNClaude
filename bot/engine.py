@@ -169,8 +169,10 @@ class Engine:
         indicator_text = describe_snapshot(snapshot)
 
         if not candidate:
+            reasons = "; ".join(snapshot.get("blocked_reasons") or ["thresholds not all met"])
+            logger.debug("%s: no entry signal — %s", pair, reasons)
             self._narrate(pair, f"{pair_display}: {indicator_text} No entry signal this cycle "
-                                f"— RSI/trend/volume thresholds not all met.")
+                                f"— {reasons}.")
             return
 
         risk_cfg = self.cfg.get("risk", {})

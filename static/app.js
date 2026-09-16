@@ -286,6 +286,7 @@ function buildSettingsForm(data) {
         <input type="number" id="s-rsi-ob" value="${c.signals.rsi_overbought}">
         <label>Volume multiplier min</label>
         <input type="number" step="0.1" id="s-vol-mult" value="${c.signals.volume_mult_min}">
+        <label><input type="checkbox" id="s-vol-confirm" ${c.signals.require_volume_confirmation ? "checked" : ""}> Require volume confirmation</label>
       </div>
       <div>
         <label>Risk % per trade (max ${data.hard_limits.risk_pct_max * 100}%)</label>
@@ -342,6 +343,7 @@ async function saveSettings() {
         rsi_oversold: Number($("#s-rsi-os").value),
         rsi_overbought: Number($("#s-rsi-ob").value),
         volume_mult_min: Number($("#s-vol-mult").value),
+        require_volume_confirmation: $("#s-vol-confirm").checked,
       },
       risk: {
         risk_pct: Number($("#s-risk-pct").value),

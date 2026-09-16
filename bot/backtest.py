@@ -89,3 +89,102 @@ def compare_configs(ohlc, current_signals_cfg, current_risk_cfg, proposed_signal
         "current": run_backtest(ohlc, current_signals_cfg, current_risk_cfg),
         "proposed": run_backtest(ohlc, proposed_signals_cfg, proposed_risk_cfg),
     }
+
+
+def count_candidate_signals(ohlc, signals_cfg):
+    """Walk-forward replay (same windowing as run_backtest) that just counts
+    how many cycles would have produced a candidate entry signal under
+    `signals_cfg` — no trade simulation, so it's cheap enough to run as a
+    pre-deploy sanity check over the full history in one pass."""
+    sma_slow = signals_cfg.get("sma_slow", 200)
+    min_window = sma_slow + 2
+    if len(ohlc) <= min_window:
+        return {"cycles_evaluated": 0, "candidate_signals": 0}
+
+    cycles_evaluated = 0
+    candidate_signals = 0
+    for i in range(min_window, len(ohlc)):
+        window = ohlc[: i + 1]
+        cycles_evaluated += 1
+        if generate_signal(window, signals_cfg) is not None:
+            candidate_signals += 1
+    return {"cycles_evaluated": cycles_evaluated, "candidate_signals": candidate_signals}
+
+
+def compare_thresholds(ohlc, old_signals_cfg, new_signals_cfg):
+    """Sanity-check helper for step 4: how many cycles over `ohlc` would have
+    produced a candidate signal under the old thresholds vs. the new
+    (loosened) ones. Does not touch risk/cost-filter/Claude-gate logic —
+    purely counts how often the local pre-filter would have advanced past
+    itself to ask Claude for a decision."""
+    return {
+        "old": count_candidate_signals(ohlc, old_signals_cfg),
+        "new": count_candidate_signals(ohlc, new_signals_cfg),
+    }
+
+
+def _cli_report(pair, interval_min, days, old_signals_cfg, new_signals_cfg, ohlc):
+    minutes_per_day = 24 * 60
+    max_candles = max(1, int(days * minutes_per_day) // interval_min)
+    window = ohlc[-max_candles:] if len(ohlc) > max_candles else ohlc
+    actual_days = len(window) * interval_min / minutes_per_day
+
+    result = compare_thresholds(window, old_signals_cfg, new_signals_cfg)
+
+    def _fmt(label, cfg, stats):
+        cycles = stats["cycles_evaluated"]
+        hits = stats["candidate_signals"]
+        pct = (hits / cycles * 100.0) if cycles else 0.0
+        print(f"{label} (rsi_oversold={cfg['rsi_oversold']}, rsi_overbought={cfg['rsi_overbought']}, "
+              f"volume_mult_min={cfg['volume_mult_min']}, "
+              f"require_volume_confirmation={cfg.get('require_volume_confirmation', True)}):")
+        print(f"  candidate signals: {hits} / {cycles} cycles ({pct:.2f}%)")
+
+    print("=== Signal threshold sanity check ===")
+    print(f"Pair: {pair} | Interval: {interval_min}m | "
+          f"Window: ~{actual_days:.1f} days ({len(window)} candles)")
+    print()
+    _fmt("Old thresholds", old_signals_cfg, result["old"])
+    print()
+    _fmt("New thresholds", new_signals_cfg, result["new"])
+    return result
+
+
+def main():
+    """CLI sanity check: fetches recent OHLC for the configured pair from
+    Kraken's public API (no credentials needed) and reports how many cycles
+    would have fired a candidate signal under the old (30/70/1.3) thresholds
+    vs. whatever `signals` block is currently in config.json. Run before
+    flipping a loosened config live:
+
+        python -m bot.backtest --days 7
+    """
+    import argparse
+
+    from config import load_config
+    from .kraken_client import KrakenClient
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--pair", default=None, help="Defaults to the first pair in config.json")
+    parser.add_argument("--interval", type=int, default=15, help="OHLC candle size in minutes")
+    parser.add_argument("--days", type=float, default=7, help="How many recent days to evaluate")
+    args = parser.parse_args()
+
+    cfg = load_config()
+    pair = args.pair or (cfg.get("pairs") or ["XBTUSD"])[0]
+    new_signals_cfg = cfg.get("signals", {})
+    old_signals_cfg = dict(new_signals_cfg)
+    old_signals_cfg.update({
+        "rsi_oversold": 30,
+        "rsi_overbought": 70,
+        "volume_mult_min": 1.3,
+        "require_volume_confirmation": True,
+    })
+
+    kc = KrakenClient()
+    ohlc = kc.ohlc(pair, args.interval)[:-1]  # drop the still-forming candle, same as the engine
+    _cli_report(pair, args.interval, args.days, old_signals_cfg, new_signals_cfg, ohlc)
+
+
+if __name__ == "__main__":
+    main()
