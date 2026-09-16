@@ -19,7 +19,7 @@ import urllib.parse
 import requests
 
 API_URL = "https://api.kraken.com"
-USER_AGENT = "KrakenMarginBot/0.1 (personal research bot)"
+USER_AGENT = "BotNClaude/0.1 (personal research bot)"
 
 TRANSIENT_ERRORS = ("EAPI:Rate limit", "EService:Unavailable", "EService:Busy",
                     "EGeneral:Temporary")

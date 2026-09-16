@@ -64,7 +64,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
             if pysecrets.compare_digest(user, expected_user) and pysecrets.compare_digest(pwd, expected_pwd):
                 return await call_next(request)
         return PlainTextResponse("Authentication required", status_code=401,
-                                 headers={"WWW-Authenticate": 'Basic realm="kraken-margin-bot"'})
+                                 headers={"WWW-Authenticate": 'Basic realm="botnclaude"'})
 
 
 @asynccontextmanager

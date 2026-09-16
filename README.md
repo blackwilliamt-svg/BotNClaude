@@ -1,4 +1,4 @@
-# Kraken Margin Trading Bot
+# BotNClaude
 
 Continuously-running leveraged margin trading bot for Kraken, gated on Claude
 as a second-stage approval/leverage check, controlled from a browser

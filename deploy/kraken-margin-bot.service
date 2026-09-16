@@ -1,5 +1,5 @@
 [Unit]
-Description=Kraken Margin Trading Bot
+Description=BotNClaude
 After=network-online.target
 Wants=network-online.target
 
